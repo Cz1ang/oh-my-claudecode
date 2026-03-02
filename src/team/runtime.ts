@@ -2,7 +2,7 @@ import { mkdir, writeFile, readFile, rm, rename } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import type { CliAgentType } from './model-contract.js';
-import { buildWorkerArgv, validateCliAvailable, getWorkerEnv as getModelWorkerEnv, isPromptModeAgent, getPromptModeArgs } from './model-contract.js';
+import { buildWorkerArgv, resolveValidatedBinaryPath, getWorkerEnv as getModelWorkerEnv, isPromptModeAgent, getPromptModeArgs } from './model-contract.js';
 import { validateTeamName } from './team-name.js';
 import {
   createTeamSession, spawnWorkerInPane, sendToWorker,
@@ -41,6 +41,8 @@ export interface TeamRuntime {
   workerPaneIds: string[];
   activeWorkers: Map<string, ActiveWorkerState>;
   cwd: string;
+  /** Preflight-validated absolute binary paths, keyed by agent type */
+  resolvedBinaryPaths?: Partial<Record<CliAgentType, string>>;
   stopWatchdog?: () => void;
 }
 
@@ -336,9 +338,10 @@ export async function startTeam(config: TeamConfig): Promise<TeamRuntime> {
   const { teamName, agentTypes, tasks, cwd } = config;
   validateTeamName(teamName);
 
-  // Validate CLIs are available
+  // Validate CLIs once and pin absolute binary paths for consistent spawn behavior.
+  const resolvedBinaryPaths: Partial<Record<CliAgentType, string>> = {};
   for (const agentType of [...new Set(agentTypes)]) {
-    validateCliAvailable(agentType);
+    resolvedBinaryPaths[agentType] = resolveValidatedBinaryPath(agentType);
   }
 
   const root = stateRoot(cwd, teamName);
@@ -389,6 +392,7 @@ export async function startTeam(config: TeamConfig): Promise<TeamRuntime> {
     workerPaneIds: session.workerPaneIds, // initially empty []
     activeWorkers: new Map(),
     cwd,
+    resolvedBinaryPaths,
   };
 
   const maxConcurrentWorkers = agentTypes.length;
@@ -664,10 +668,17 @@ export async function spawnWorkerForTask(
   const relInboxPath = `.omc/state/team/${runtime.teamName}/workers/${workerNameValue}/inbox.md`;
 
   const envVars = getModelWorkerEnv(runtime.teamName, workerNameValue, agentType);
+  const resolvedBinaryPath = runtime.resolvedBinaryPaths?.[agentType] ?? resolveValidatedBinaryPath(agentType);
+  if (!runtime.resolvedBinaryPaths) {
+    runtime.resolvedBinaryPaths = {};
+  }
+  runtime.resolvedBinaryPaths[agentType] = resolvedBinaryPath;
+
   const [launchBinary, ...launchArgs] = buildWorkerArgv(agentType, {
     teamName: runtime.teamName,
     workerName: workerNameValue,
     cwd: runtime.cwd,
+    resolvedBinaryPath,
   });
 
   // For prompt-mode agents (e.g. Gemini Ink TUI), pass instruction via CLI
